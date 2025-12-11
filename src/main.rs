@@ -1,40 +1,40 @@
-use core::panic;
-#[cfg(feature = "field-control")]
-use std::time::Duration;
-use std::{env, num::NonZeroU32, path::PathBuf};
-
-use cargo_metadata::camino::Utf8PathBuf;
-#[cfg(feature = "field-control")]
-use cargo_v5::{commands::field_control::run_field_control_tui, errors::CliError};
 use cargo_v5::{
     commands::{
         build::{CargoOpts, build},
         cat::cat,
         devices::devices,
         dir::dir,
+        key_value::{kv_get, kv_set},
         log::log,
         new::new,
         rm::rm,
         screenshot::screenshot,
         terminal::terminal,
+        migrate,
         upload::{AfterUpload, UploadOpts, upload},
     },
-    connection::{open_connection, switch_radio_channel},
+    connection::{open_connection, switch_to_download_channel},
+    errors::CliError,
     self_update::{self, SelfUpdateMode},
 };
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use flexi_logger::{AdaptiveFormat, FileSpec, LogfileSelector, LoggerHandle};
-#[cfg(feature = "field-control")]
-use vex_v5_serial::connection::serial::{self, SerialConnection, SerialDevice};
+use std::{env, num::NonZeroU32, panic, path::PathBuf};
 use vex_v5_serial::{
-    connection::Connection,
-    packets::{
-        file::{FileLoadAction, FileVendor, LoadFileActionPacket, LoadFileActionPayload},
-        radio::RadioChannel,
+    Connection,
+    protocol::{
+        FixedString,
+        cdc2::file::{FileLoadAction, FileLoadActionPacket, FileLoadActionPayload, FileVendor},
     },
-    string::FixedString,
+    serial::{self, SerialConnection, SerialDevice},
 };
+
+#[cfg(feature = "field-control")]
+use cargo_v5::commands::field_control::run_field_control_tui;
+#[cfg(feature = "field-control")]
+use std::time::Duration;
+#[cfg(feature = "field-control")]
 
 cargo_subcommand_metadata::description!("Manage vexide projects");
 
@@ -49,21 +49,33 @@ enum Cargo {
         command: Command,
 
         #[arg(long, default_value = ".", global = true)]
-        path: Utf8PathBuf,
+        path: PathBuf,
     },
+}
+
+/// Access a Brain's system key/value configuration.
+#[derive(Subcommand, Debug)]
+#[clap(name = "kv")]
+enum KeyValue {
+    /// Get the value of a system variable on a Brain.
+    Get { key: String },
+
+    /// Set a system variable on a Brain.
+    Set { key: String, value: String },
 }
 
 /// A possible `cargo v5` subcommand.
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Build a project for the V5 brain.
+    /// Build a project for the V5 Brain.
     #[clap(visible_alias = "b")]
     Build {
         /// Arguments forwarded to `cargo`.
         #[clap(flatten)]
         cargo_opts: CargoOpts,
     },
-    /// Build a project and upload it to the V5 brain.
+    
+    /// Upload a project or file to a Brain.
     #[clap(visible_alias = "u")]
     Upload {
         #[arg(long, default_value = "none")]
@@ -72,12 +84,15 @@ enum Command {
         #[clap(flatten)]
         upload_opts: UploadOpts,
     },
-    /// Access the brain's remote terminal I/O.
+    
+    /// Access a Brain's remote terminal I/O.
     #[clap(visible_alias = "t")]
     Terminal,
-    /// Build, upload, and run a program on the V5 brain, showing its output in the terminal.
+    
+    /// Build, upload, and run a program on a V5 Brain, showing its output in the terminal.
     #[clap(visible_alias = "r")]
     Run(UploadOpts),
+    
     /// Create a new vexide project with a given name.
     #[clap(visible_alias = "n")]
     New {
@@ -87,36 +102,56 @@ enum Command {
         #[clap(flatten)]
         download_opts: DownloadOpts,
     },
-    /// Creates a new vexide project in the current directory
+    
+    /// Create a new vexide project in the current directory.
     Init {
         #[clap(flatten)]
         download_opts: DownloadOpts,
     },
+    
     /// List files on flash.
     #[clap(visible_alias = "ls")]
     Dir,
+    
     /// Read a file from flash, then write its contents to stdout.
-    Cat { file: PathBuf },
+    Cat {
+        file: PathBuf,
+    },
+
     /// Erase a file from flash.
-    Rm { file: PathBuf },
-    /// Read event log.
+    Rm {
+        file: PathBuf,
+    },
+    
+    /// Read a Brain's event log.
     Log {
         #[arg(long, short, default_value = "1")]
         page: NonZeroU32,
     },
-    /// List devices connected to a brain.
+    
+    /// List devices connected to a Brain.
     #[clap(visible_alias = "lsdev")]
     Devices,
+
     /// Take a screen capture of the brain, saving the file to the current directory.
     #[clap(visible_alias = "sc")]
     Screenshot,
+    
+    /// Access a Brain's system key/value configuration.
+    #[command(subcommand, visible_alias = "kv")]
+    KeyValue(KeyValue),
+    
     /// Run a field control TUI.
     #[cfg(feature = "field-control")]
     #[clap(visible_aliases = ["fc", "comp-control"])]
     FieldControl,
+    
     /// Update cargo-v5 to the latest version.
     #[clap(hide = matches!(*self_update::CURRENT_MODE, SelfUpdateMode::Unmanaged(_)))]
     SelfUpdate,
+
+    /// Migrate an older project to vexide 0.8.0.
+    Migrate,
 }
 
 #[derive(Args, Debug)]
@@ -149,7 +184,7 @@ async fn main() -> miette::Result<()> {
         .unwrap();
 
     if let Err(err) = app(command, path, &mut logger).await {
-        log::debug!("cargo-v5 is exiting due to an error: {}", err);
+        log::debug!("cargo-v5 is exiting due to an error: {err}");
         if let Ok(files) = logger.existing_log_files(&LogfileSelector::default()) {
             for file in files {
                 eprintln!("A log file is available at {}.", file.display());
@@ -160,7 +195,7 @@ async fn main() -> miette::Result<()> {
     Ok(())
 }
 
-async fn app(command: Command, path: Utf8PathBuf, logger: &mut LoggerHandle) -> miette::Result<()> {
+async fn app(command: Command, path: PathBuf, logger: &mut LoggerHandle) -> miette::Result<()> {
     match command {
         Command::Build { cargo_opts } => {
             build(&path, cargo_opts).await?;
@@ -184,11 +219,11 @@ async fn app(command: Command, path: Utf8PathBuf, logger: &mut LoggerHandle) -> 
                     //
                     // Don't bother waiting for a response, since the brain could
                     // be locked up and prevent the program from exiting.
-                    _ = connection.send_packet(
-                        LoadFileActionPacket::new(LoadFileActionPayload {
+                    _ = connection.send(
+                        FileLoadActionPacket::new(FileLoadActionPayload {
                             vendor: FileVendor::User,
                             action: FileLoadAction::Stop,
-                            file_name: FixedString::new(Default::default()).unwrap(),
+                            file_name: FixedString::default(),
                         })
                     ).await;
 
@@ -196,9 +231,21 @@ async fn app(command: Command, path: Utf8PathBuf, logger: &mut LoggerHandle) -> 
                 }
             }
         }
+        Command::KeyValue(subcommand) => {
+            let mut connection = open_connection().await?;
+            match subcommand {
+                KeyValue::Get { key } => {
+                    println!("{}", kv_get(&mut connection, &key).await?);
+                }
+                KeyValue::Set { key, value } => {
+                    kv_set(&mut connection, &key, &value).await?;
+                    println!("{key} = {}", kv_get(&mut connection, &key).await?);
+                }
+            }
+        }
         Command::Terminal => {
             let mut connection = open_connection().await?;
-            switch_radio_channel(&mut connection, RadioChannel::Download).await?;
+            switch_to_download_channel(&mut connection).await?;
             terminal(&mut connection, logger).await;
         }
         #[cfg(feature = "field-control")]
@@ -208,14 +255,14 @@ async fn app(command: Command, path: Utf8PathBuf, logger: &mut LoggerHandle) -> 
                 let devices = serial::find_devices().map_err(CliError::SerialError)?;
 
                 tokio::task::spawn_blocking::<_, Result<SerialConnection, CliError>>(move || {
-                    Ok(devices
+                    devices
                         .into_iter()
                         .find(|device| {
                             matches!(device, SerialDevice::Controller { system_port: _ })
                         })
                         .ok_or(CliError::NoController)?
                         .connect(Duration::from_secs(5))
-                        .map_err(CliError::SerialError)?)
+                        .map_err(CliError::SerialError)
                 })
                 .await
                 .unwrap()?
@@ -234,6 +281,9 @@ async fn app(command: Command, path: Utf8PathBuf, logger: &mut LoggerHandle) -> 
         }
         Command::SelfUpdate => {
             self_update::self_update().await?;
+        }
+        Command::Migrate => {
+            migrate::migrate_workspace(&path).await?;
         }
     }
 
