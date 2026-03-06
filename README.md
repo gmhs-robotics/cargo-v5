@@ -27,7 +27,7 @@ brew install vexide/vexide/cargo-v5
 > *Supports macOS & Linux (probably not NixOS)*
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vexide/cargo-v5/releases/latest/download/cargo-v5-installer.sh | sh
+curl -fsSL https://vexide.dev/install.sh | sh
 ```
 
 ### Install via PowerShell script
@@ -35,7 +35,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vexide/cargo-v5/release
 > *Supports Windows*
 
 ```powershell
-irm https://github.com/vexide/cargo-v5/releases/latest/download/cargo-v5-installer.ps1 | iex
+irm https://vexide.dev/install.ps1 | iex
 ```
 
 ### Build from source
