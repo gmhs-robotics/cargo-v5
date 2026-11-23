@@ -31,7 +31,7 @@ use vex_v5_serial::{
 };
 
 #[cfg(feature = "field-control")]
-use {cargo_v5::commands::field_control::run_field_control_tui, std::time::Duration};
+use cargo_v5::commands::field_control::run_field_control_tui;
 
 cargo_subcommand_metadata::description!("Manage vexide projects");
 

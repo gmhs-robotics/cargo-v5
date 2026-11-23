@@ -33,6 +33,13 @@
         };
 
         packages = let
+          vexV5Serial = builtins.fetchTree {
+            type = "github";
+            owner = "vexide";
+            repo = "vex-v5-serial";
+            rev = "265dc8c71523e6e2fc9ca1d2448038ce57984a0b";
+            narHash = "sha256-Rwdtv+uorT545dl+QF7QgK2R4laHLewtOzakl2aFY58=";
+          };
           naersk' = pkgs.callPackage naersk {
             cargo = pkgs.rust-bin.stable.latest.default;
             rustc = pkgs.rust-bin.stable.latest.default;
@@ -48,6 +55,13 @@
 
               src = ./.;
 
+              # Cargo's local dependency must be beside both naersk source trees.
+              override = old: {
+                preBuild = (old.preBuild or "") + ''
+                  cp -R ${vexV5Serial.outPath} ../vex-v5-serial
+                '';
+              };
+
               passthru = {
                 withFeatures = features: build-cargo-v5 { inherit features; };
               };
@@ -61,7 +75,7 @@
               nativeBuildInputs = with pkgs; [ pkg-config dbus udev ];
             };
         in rec {
-          cargo-v5 = build-cargo-v5 { };
+          cargo-v5 = build-cargo-v5 { features = [ "field-control" ]; };
           default = cargo-v5;
         };
 

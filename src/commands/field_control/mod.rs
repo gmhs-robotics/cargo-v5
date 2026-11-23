@@ -51,19 +51,14 @@ async fn try_read_terminal(connection: &mut SerialConnection) -> Result<Vec<u8>,
         .handshake(
             UserDataPacket {
                 channel: 1, // stdio channel
-                write: None,
+                write: Default::default(),
             },
             Duration::from_millis(100),
             1,
         )
         .await??;
 
-    let mut data = Vec::new();
-    if let Some(read) = read.data {
-        data.extend(read.as_bytes());
-    }
-
-    Ok(data)
+    Ok(read.data.to_vec())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
